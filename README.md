@@ -1,4 +1,4 @@
-# racemi: Interacting particle system and BUNCH algorithm
+# Interacting particle system and BUNCH algorithm
 
 Code for the BUNCH algorithm described in the article [Defining and finding lifelike entities with a lazy filter](https://arxiv.org/abs/2504.14774).
 
