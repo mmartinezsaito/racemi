@@ -1,0 +1,1007 @@
+<html>
+<title>Racemi in 2D</title>
+
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        :root {
+            color-scheme: dark;
+            --canvas-bg-color: rgba(0, 0, 0, 0); /* transparent */
+        }
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        #mycanvas {
+            border: hsl(0 0% 30%);/*  #999999; #504e52 */
+            border-style: solid; /* ridge, dashed */
+            border-width: 5;
+            outline: none;  /* because of the 'tabindex' focus trick */
+            background-color: var(--canvas-bg-color);  
+        }
+    </style>
+
+    <!-- lilgui -->
+    <script src="https://cdn.jsdelivr.net/npm/lil-gui@0.17"></script>
+    <!--script src="lilgui.js"></script-->
+    
+    <!-- Plotly -->
+    <!--script src="https://cdn.plot.ly/plotly-2.20.0.min.js" charset="utf-8"></script-->
+    <script src="plotly-2.20.0.min.js" charset="utf-8"></script>
+
+</head>
+
+<body>
+    <!-- 'tabindex' is a trick to make the canvas capture key events -->
+    <canvas id="mycanvas" tabindex="1"></canvas>
+    
+    <div id="fig01" style="width:600px;height:600px;"></div>
+
+    <script>
+	console.log(document.getElementById("mycanvas"));
+
+        const numAtomTypes = 4;
+        const numAtoms = 60;
+        const atomRadius = 4;
+	const interactionRange = 80;
+        const minClustMembCount = 2;
+	const maxNumLiveClusters = numAtoms * (1/(1 - 1/5) - 1); // 2->1, 4->1/3, 5->1/4,
+        const maxRadius = [2000, 1000];
+        const palette = ['red', 'green', 'cyan', 'teal', 'lavender', 'yellow', 'blue', 'magenta'];
+        const wallElasticity = .5; //0.1;
+
+        const settings = {
+            seed: 91651088029,
+            fps: 0,
+            atoms: {
+                count: numAtoms / numAtomTypes,  // per color
+                radius: atomRadius,
+            },
+            drawings: {  // drawing options can be expensive on performance
+                forcelines: false,    // central force lines between interacting atoms 
+                round: false,         // draw round atoms 
+                clusters: false,
+                background_color: '#00000000', 
+            },
+            explore: false,
+            explorePeriod: 100,
+            interactionForces: {},
+ //           rulesArray: [],
+            range: {},
+//            radii2Array: [],
+            colors: [],
+            numColors: numAtomTypes,
+            maxNumLiveClusters: maxNumLiveClusters,
+            time_scale: 1.0,
+            viscosity: 0.7,  // speed-dampening (can be >1 !)
+            gravity: 0.0,  // pulling downward
+            prodDuration: 10,
+	    wraparound: false,
+            wallThickness: 40,
+	    reset: () => resetAtoms(settings.atoms.count, true),
+            randomInteractions: () => {
+                settings.seed += 0x6D2B79F5;  // change seed
+                randomRestart();
+            },
+            symmetrizeInteractions: () => {
+                symmetrizeInteractions();
+                resetAtoms(settings.atoms.count, true);
+                updateGuiDisplay();
+            },
+            gui: null,
+            export: {     
+                image: () => {   // screenshot image
+                    const imageDataURL = canv.toDataURL({format: 'png', quality: 1});
+                    dataUrlDownloader(imageDataURL);
+                },
+                video: () => mediaRecorder.state == 'recording' ? mediaRecorder.stop() : mediaRecorder.start(), // video recording
+            },
+        }
+
+
+        /*** SET UP GUI ***/
+
+        const setupProd = () => {
+            canv.addEventListener('click', (me) => {prod = settings.prodDuration;   // MouseEvent
+                                                    if (me.shiftKey) prod = -prod;        // if shiftKey then attract
+                                                    prod_x = me.clientX; prod_y = me.clientY;
+            })
+        }
+
+        const setupHotkeys = () => {
+	    canv.addEventListener('keydown', (ke) => {  // KeyboardEvent
+                    console.log(ke.key);
+                    switch (ke.key) {
+                        case 'r': settings.randomInteractions();                                   break;
+                        case 'c': settings.drawings.clusters = !settings.drawings.clusters; break;
+                        case ' ': settings.reset();                                         break;
+                        case 's': settings.symmetrizeInteractions();                               break;
+                        default:  console.log(ke.key);
+                    };
+            })
+        }
+
+        const updateGuiDisplay = () => {
+            console.log('gui', settings.gui);
+            settings.gui.destroy();
+            setupGui();
+        }
+
+        Object.defineProperty(String.prototype, 'capitalize', {
+	    value: function() {return this.charAt(0).toUpperCase() + this.slice(1)},
+            enumerable: false
+        })
+
+        const setupGui = () => {
+            settings.gui = new lil.GUI()
+
+            // Physics
+            const configFolder = settings.gui.addFolder('Physics')
+            configFolder.add(settings, 'reset').name('Reset')
+            configFolder.add(settings, 'randomInteractions').name('Random interactions')
+            configFolder.add(settings, 'symmetrizeInteractions').name('Symmetric interactions')
+            configFolder.add(settings, 'seed').name('Seed').listen().onFinishChange(v => randomRestart())
+            configFolder.add(settings, 'fps').name('fps').listen().disable()
+	    configFolder.add(settings, 'numColors', 1, 7, 1).name('Number of colors').listen().onFinishChange(v => {setColors(); randomRestart();})
+            configFolder.add(settings.atoms, 'count', 1, numAtomsNow()/numAtomTypes*2, 1).name('Atoms per color').listen().onFinishChange(v => resetAtoms(v, true))
+            configFolder.add(settings, 'maxNumLiveClusters', 1, numAtomsNow(), 1).name('Max. num. of clusters').listen()
+            configFolder.add(settings, 'time_scale', .01, 5, 0.01).name('Time scale').listen()
+            configFolder.add(settings, 'viscosity', 0, 2, 0.1).name('Viscosity').listen()
+            configFolder.add(settings, 'gravity', 0., 1., 0.05).name('Gravity').listen()
+            configFolder.add(settings, 'prodDuration', 1, 100, 1).name('Prod duration').listen()
+            configFolder.add(settings, 'wraparound').name('Wrap around').listen()
+            configFolder.add(settings, 'wallThickness', 0, 100, 1).name('Wall thickness').listen()
+            configFolder.add(settings, 'explore').name('Parameter exploration').listen()
+
+            // Drawings
+            const drawingsFolder = settings.gui.addFolder('Drawings')
+            drawingsFolder.add(settings.atoms, 'radius', 1, 10, 0.5).name('Radius').listen()
+            drawingsFolder.add(settings.drawings, 'round').name('Round shape').listen()
+            drawingsFolder.add(settings.drawings, 'clusters').name('Track clusters').listen()
+            drawingsFolder.add(settings.drawings, 'forcelines').name('Central force lines').listen()
+            drawingsFolder.addColor(settings.drawings, 'background_color').name('Background color').listen()
+
+            // Color interactions
+            for (const atomColor of settings.colors) {
+                const colorFolder =
+                    settings.gui.addFolder(`Rules: <font color=\'${atomColor}\'>${atomColor.capitalize()}</font>`)
+                for (const ruleColor of settings.colors) {
+                    colorFolder.add(settings.interactionForces[atomColor], ruleColor, -1, 1, 0.001)
+                         .name(`<-> <font color=\'${ruleColor}\'>${ruleColor.capitalize()}</font>`)
+            //             .listen().onFinishChange(v => { flattenRules() })
+                         .listen()
+                }
+                colorFolder.add(settings.range, atomColor, 1, maxRadius[0], 5).name('Radius')
+                //    .listen().onFinishChange(v => { flattenRules() })
+                    .listen()
+            }
+
+            // Export
+            const exportFolder = settings.gui.addFolder('Export')
+            exportFolder.add(settings.export, 'image').name('Image')
+            exportFolder.add(settings.export, 'video').name('Video: Start / Stop')
+
+        }
+
+
+        /*** PRNG ***/
+
+        // Pseudorandom number generator
+        // https://stackoverflow.com/questions/521295/seeding-the-random-number-generator-in-javascript
+        function mulberry32prng(seed) {
+            return function() {
+	        var t = seed += 0x6D2B79F5;
+		t = Math.imul(t ^ t >>> 15, t | 1);
+	        t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+	        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+	    }
+	}
+
+        function getSeedFromUrlFragment() { 
+            let hash = window.location.hash;  // fragment identifier of the URL
+            if (hash != undefined && hash[0] == '#') {
+                let urlfi = Number(hash.substr(1)); // remove the leading '#'
+                if (isFinite(urlfi)) {
+                    settings.seed = urlfi;
+                    console.log("Using from the URL fragment the seed " + settings.seed);
+                }
+            }
+        }
+
+
+
+	/*** ATOMS AND FORCES ***/    
+
+        // atom = [x, y, vx, vy, hsl, id]
+
+        // Initiate random locations for atoms 
+        function randomX() {return mb32closure() * (canv.width - 100) + 50;}
+        function randomY() {return mb32closure() * (canv.height - 100) + 50;}
+        const createRandomAtom = (number, hsl, id) => {
+            for (let i = 0; i < number; i++) atoms.push([randomX(), randomY(), 0, 0, hsl, id]);
+        };
+
+        function resetAtoms(numPerColor, erase_past) {
+	    if (erase_past) {
+		atoms.length = 0;
+                clusters.length = 0;   //for (c of clusters) c.length = 0;
+                entities.length = 0; //for (e of entities) e.length = 0;
+	        starttime = Date.now();
+	    }
+            for (let i = 0; i < settings.colors.length; i++) createRandomAtom(numPerColor, rgb2hsl(...colstr2rgb(settings.colors[i])), i);
+        }
+
+        function randomInteractions() {
+            for (const i of settings.colors) {
+                settings.interactionForces[i] = {};
+                for (const j of settings.colors) settings.interactionForces[i][j] = mb32closure() * 2 - 1; // range [-1 1]
+                settings.range[i] = interactionRange;
+            }
+            if (!isFinite(settings.seed)) settings.seed = 0xcafecafe;
+            window.location.hash = "#" + settings.seed;
+            document.title = "Racemi2D #" + settings.seed;
+            console.log("Seed=" + settings.seed);
+            console.log(JSON.stringify(settings.interactionForces));
+//            flattenRules();
+        }
+
+        function symmetrizeInteractions() {
+            for (const i of settings.colors) 
+                for (const j of settings.colors) 
+                    if (j < i) {
+                        let v = 0.5 * (settings.interactionForces[i][j] + settings.interactionForces[j][i]);
+                        settings.interactionForces[i][j] = settings.interactionForces[j][i] = v;
+                    }
+            console.log(JSON.stringify(settings.interactionForces));
+  //          flattenRules();
+        }
+
+   /*     function flattenRules() {
+            settings.rulesArray = []; settings.radii2Array = [];
+            for (const c1 of settings.colors) {
+                for (const c2 of settings.colors) 
+                    settings.rulesArray.push(settings.interactionForces[c1][c2]);
+                settings.radii2Array.push(settings.range[c1] ** 2);
+            }
+        }
+    */
+
+        function randomRestart() {
+            randomInteractions();
+            resetAtoms(settings.atoms.count, true);
+            updateGuiDisplay();
+        }
+
+        function setColors() {
+            settings.colors = [];
+            for (let i = 0; i < settings.numColors; ++i) settings.colors.push(palette[i]);
+        }
+
+
+	 /*** DISPLAY AND DRAWING ***/   
+
+        function updateCanvasSize() {
+            canv.width = window.innerWidth * 0.8;
+            canv.height = window.innerHeight * 0.95;
+        }
+
+        function colstr2rgb(str) {
+            var a = document.createElement('div');
+            a.style.color = str;
+            var colors = window.getComputedStyle( document.body.appendChild(a) ).color.match(/\d+/g).map(function(a){ return parseInt(a,10); });
+            document.body.removeChild(a);
+	    return (colors.length>=3) ? colors : false;
+        };
+	function rgb2hsl(r, g, b) {
+	    r /= 255; g /= 255; b /= 255;
+	    let cmin = Math.min(r,g,b), cmax = Math.max(r,g,b), delta = cmax - cmin, h = 0, s = 0, l = 0;
+	    // hue
+	    if (delta == 0) h = 0;
+            else if (cmax == r) h = ((g - b) / delta) % 6;
+	    else if (cmax == g) h = (b - r) / delta + 2;
+	    else                h = (r - g) / delta + 4;
+	    h = Math.round(h * 60);
+	    if (h < 0) h += 360;
+            // lightness
+	    const l1 = (cmax + cmin) / 2;  
+	    l = +(l1 * 100).toFixed(1);
+            // saturation
+	    s = delta == 0 ? 0 : delta / (1 - Math.abs(2 * l1 - 1)); 
+	    s = +(s * 100).toFixed(1);
+	    return [h, s, l] 
+	}	
+        hsl2str = (h,s,l) => "hsl(" + h + "," + s + "%," + l + "%)";
+
+	hslColor = (h, s, l, a = 1) => {`hsl(${h},${s}%,${l}%,${a})`};
+
+        // Draw a square
+        const drawSquare = (x, y, color, radius) => {
+            crc.fillStyle = color;
+            crc.fillRect(x - radius, y - radius, 2 * radius, 2 * radius);
+        }
+
+        // Draw a circle
+        function drawCircle(x, y, color, radius, fill = true, lw = 1, dash = [false, 10, 10]) {
+	    crc.lineWidth = lw;	    
+	    if (dash[0]) crc.setLineDash(dash.slice(1,3)); 
+            crc.beginPath();
+            crc.arc(x, y, radius, 0 * Math.PI, 2 * Math.PI);  // x, y, radius, ArcStart, ArcEnd
+            crc.closePath();
+            crc.strokeStyle = color;
+	    crc.fillStyle = color;
+            fill ? crc.fill() : crc.stroke()
+        };
+
+        // Draw line between atoms
+        function drawInteraction(ax, ay, bx, by, color) {
+            crc.beginPath();
+            crc.moveTo(ax, ay);
+            crc.lineTo(bx, by);
+            crc.closePath();
+            crc.strokeStyle = color;
+            crc.stroke();
+        };
+
+
+	/*** CLUSTERS ***/    
+
+        // clusters (previously):     [position-x, position-y, radius, color]
+        // clusters:     [position-x, position-y, sma1, sma2, hslcolor, members, member_dists, entid]
+        // Voronoi cell: [count, accum-x, accum-y, accum-d^2, accum-hslcolor, members, member_dists]
+	const clusters = [];
+
+        function newRandomCluster() {
+            return [randomX(), randomY(), maxRadius[0], maxRadius[0], rgb2hsl(...colstr2rgb('white')), [], [], undefined];
+        }
+        function addNewClusters(maxNumLiveClus) {
+            if (clusters.slice(-1)[0].length == 0) clusters.pop();
+	    //for (i = 1; i < clusters.length; ++i) if (clusters[i].length == 0) clusters.splice(i, 1); //clusters.filter(c => c != []); 
+            if (clusters.slice(-1)[0].length > 1) clusters.push([newRandomCluster()]);
+
+            if (numClus()[2] < maxNumLiveClus * .8) {
+		do for (l of clusters.slice(1)) { 
+	            for (c of l) if (c.length == 0) c = newRandomCluster();
+		    l.push(newRandomCluster());
+		} while (numClus()[2] < maxNumLiveClus);
+            }
+        }
+        function findNearestCluster(x, y, clus) {
+            let nrstClus = -1;
+            let nrstClus_d2 = 1.e38;
+            for (let i = 0; i < clus.length; ++i) {
+		if (clus[i][2] == 0.) continue;
+                const dx = clus[i][0] - x, dy = clus[i][1] - y;
+                const d2 = dx ** 2 + dy ** 2;
+                if (d2 < nrstClus_d2) {
+                    nrstClus = i;
+                    nrstClus_d2 = d2;
+                }
+            }
+            return [nrstClus, nrstClus_d2];
+        }
+        function translocateClusters(vc, clus) {
+            let msd = 0.;   // maximum squared displacement
+            for (let i = 0; i < clus.length; ++i) {
+		if (clus[i].length == 1) continue;
+                if (vc[i][0] >= minClustMembCount) {
+                    const new_x = vc[i][1] / vc[i][0], new_y = vc[i][2] / vc[i][0];
+                    msd = Math.max(msd, (clus[i][0] - new_x)**2, (clus[i][1] - new_y)**2);
+                    clus[i][0] = new_x; clus[i][1] = new_y;
+                }
+            }
+            return msd;
+        }
+        function reshapeOrKill(vc, clus, l) {
+            for (let i = 0; i < clus.length; ++i) {
+                let c = clus[i], s = vc[i];
+	        if (c.length == 1 || entities.length <= l) continue;
+                if (c[5].length >= minClustMembCount) {
+                    // reshape cluster
+                    const new_r = Math.sqrt(s[3] / s[0]) + atomRadius;  // plus atom radius
+                    c[2] = 0.95 * c[2] + 0.05 * new_r;  // reshape: exponential smoothing
+		    let saturation = s[4][1] / s[0];
+                    c[4] = [s[4][0] % 360, saturation, s[4][2] / s[0]];   // repaint
+                    //const new_r = 1.10 * Math.sqrt(s[3] / s[0]);  // extra 10%
+                    //c[4] = settings.colors[Math.floor(s[4] / s[0] + .5)]; // 'average' color
+
+		    // kill orphaned ent objects
+                    mulset = transcribeClusToEntMultiset(i, l);
+                    let eis = findLiveClusterEntityIds(i, l);		   
+	            if (eis === undefined || eis.length == 0) continue;
+		    for (let ei of eis) {
+		        let e = entities[l][ei];
+                        if (mulset === undefined) {                 // no entity multiset match: members may have transformed 
+                            e[3][e[1].lastIndexOf(i)] = Date.now() - e[2][e[1].lastIndexOf(i)];  // kill orphaned ent object and compute lifespan
+		        } else if (!equalMultisets(e[0], mulset))   // if cluster c doesnt pertain anymore to e[0] but registered as alive ent object
+                            e[3][e[1].lastIndexOf(i)] = Date.now() - e[2][e[1].lastIndexOf(i)];  // kill orphaned ent object and compute lifespan
+			else {      // the entity multiset currently corresponding to c 
+                            saturation = 100*(Date.now()-e[2][e[1].lastIndexOf(i)])/(Date.now()-starttime); 
+                            c[4] = [s[4][0] % 360, saturation, s[4][2] / s[0]];   // repaint
+			}
+		    }
+
+                } else {   // kill or recreate degenerate cluster
+	            if (entities.length <= l) {          // not in census: abort and replace with last cluster
+		        const last = clus.pop(); if (i < clus.length) clus[i] = last; 
+			i--;
+		    } else {                                    
+			let iinent = false, linent = false;   // check if they are registered as ents
+		        for (var e of entities[l]) {   
+                            if (e[1].includes(i))             {iinent = true; break;} 
+			    if (e[1].includes(clus.length-1)) linent = true; 
+			}
+			if (iinent) {  // in census                  
+			    if (e[3][e[1].lastIndexOf(i)]==0) {     // if ALIVE
+			        clus[i] = ["tomb"];                               // kill and make tomb
+			        e[3][e[1].lastIndexOf(i)] = Date.now() - e[2][e[1].lastIndexOf(i)];   // lifespan
+			    }                                 // if dead, do nothing                               
+			} else {   //  not in census
+			    if (linent) clus[i] = newRandomCluster();         // abort cluster and create new cluster
+			    else        {const last = clus.pop(); if (i < clus.length) clus[i] = last; --i} // abort and replace with last
+                        }					    
+                    }
+                }
+            }
+            // note: if half of the particles are not within the average
+            // radius of the cluster, we should probably split it in two along the main axis!
+        }
+	function reallocateClusters(vc, clus, l) {
+            for (let i = 0; i < clus.length; i++) {
+		if (clus[i].length > 1 && !equalMultisets(clus[i][5], vc[i][5])) {  // if cluster members transform
+		    clus[i][5] = vc[i][5];
+ 		    clus[i][6] = vc[i][6];
+                
+		    if (entities.length > l && entities[l].length > 0) {			    
+		        for (let j = 0; j < entities[l].length; j++) {  
+		            var e = entities[l][j];
+                            if (e[1].includes(i) && e[3][e[1].lastIndexOf(i)]==0) break; // if registered and alive
+		        }
+                        e[3][e[1].lastIndexOf(i)] = Date.now() - e[2][e[1].lastIndexOf(i)]; // remove ent record and write lifespan
+
+					// maybe add here to new entity
+		    }
+		}
+            }	
+        }
+
+	function findLiveClusterEntityIds(ci, l, ents = entities) { // find all level l entities with cluster ci
+	    let ei = [];		    
+	    if (ents.length <= l) return undefined;
+	    for (let i = 0; i < ents[l].length; i++) 
+	        if (ents[l][i][1].includes(ci) && ents[l][i][3][ents[l][i][1].lastIndexOf(ci)]==0) ei.push(i);
+            return ei;
+        }
+        function reallocateReshapeKill(vc, clus, l) {
+            for (let i = 0; i < clus.length; i++) {
+                let c = clus[i], s = vc[i];
+	        if (c.length == 1) continue;  // if cluster dead
+
+		if (s[0] >= minClustMembCount) {  // reshape cluster, update parEnts
+                    // reshape cluster
+                    const new_r = Math.sqrt(s[3] / s[0]) + atomRadius;  // plus atom radius
+                    c[2] = 0.95 * c[2] + 0.05 * new_r;  // reshape: exponential smoothing
+		    let saturation = s[4][1] / s[0];
+                    c[4] = [s[4][0] % 360, saturation, s[4][2] / s[0]];   // repaint
+                    //const new_r = 1.10 * Math.sqrt(s[3] / s[0]);  // extra 10%
+                    //c[4] = settings.colors[Math.floor(s[4] / s[0] + .5)]; // 'average' color
+
+		    c[6] = s[6];
+		    if (equalMultisets(c[5], s[5])) continue; // if cluster is unchanged
+	            c[5] = s[5];		                 
+
+		    // entity bookkeeping
+		    if (entities.length <= l || entities[l].length == 0) continue;  // if ent is not up to date 
+                    const eis = findLiveClusterEntityIds(i, l);
+
+		    // kill orphaned parEnt objects
+		    if (eis !== undefined && eis.length > 0) 
+		        for (const ei of eis) { const e = entities[l][ei];   // ideally there should be one and only one
+                            e[3][e[1].lastIndexOf(i)] = Date.now() - e[2][e[1].lastIndexOf(i)];   // kill orphaned ent object and compute lifespan
+		        }
+
+		    // find new matching parent
+                    let ei = findCompoundEntities(i, l, entities)[1]; // finds parent, registers it in clus[7], updates parent children
+                        
+		    if (ei !== undefined) { const e = entities[l][ei];
+                        saturation = 100*(Date.now()-e[2][e[1].lastIndexOf(i)])/(Date.now()-starttime); 
+                        c[4] = [s[4][0] % 360, saturation, s[4][2] / s[0]];   // repaint
+		    }
+
+                } else {   // kill or recreate degenerate cluster
+	            if (entities.length <= l) {          // not in census: abort and replace with last cluster
+		        const last = clus.pop(); if (i < clus.length) clus[i] = last; i--;
+		    } else {                                    
+			let iinent = false, linent = false;   // check if they are registered as ents
+		        for (var e of entities[l]) {   
+                            if (e[1].includes(i))             {iinent = true; break;} 
+			    if (e[1].includes(clus.length-1)) linent = true; 
+			}
+			if (iinent) {  // in census                  
+			    if (e[3][e[1].lastIndexOf(i)]==0) {     // if ALIVE
+			        clus[i] = ["tomb"];                               // kill and make tomb
+			        e[3][e[1].lastIndexOf(i)] = Date.now() - e[2][e[1].lastIndexOf(i)];   // lifespan
+			    }                                 // if dead, do nothing                               
+			} else {   //  not in census
+			    if (linent) clus[i] = newRandomCluster();         // abort cluster and create new cluster
+			    else        {const last = clus.pop(); if (i < clus.length) clus[i] = last; --i} // abort and replace with last
+                        }					    
+                    }
+                }
+            }  
+        }
+	function kmeans(memb, clus, l) {
+            const maxKMeanPasses = 10;
+	    const vc = new Array(clusters.length).fill([]); // k-means' Voronoi cells
+            for (let pass = maxKMeanPasses; pass >= 0; --pass) {
+                for (let i=0; i < clus.length; ++i) vc[i] = [0, 0., 0., 0., [0, 0, 0], [], []];
+                for (let i=0; i < memb.length; i++) {
+                    let m = memb[i];
+		    let [nrstClus, nrstClus_d2] = findNearestCluster(m[0], m[1], clus);
+                    if (nrstClus >= 0 && nrstClus_d2 < maxRadius[0] ** 2) {
+                        vc[nrstClus][0] += 1;
+                        vc[nrstClus][1] += m[0]; vc[nrstClus][2] += m[1];
+                        vc[nrstClus][3] += nrstClus_d2;
+ 	                for (let v=0; v<3; v++) vc[nrstClus][4][v] += m[4][v];
+ 	                vc[nrstClus][5].push(i);
+                        vc[nrstClus][6].push(Math.sqrt(nrstClus_d2));
+                    }
+		}
+                const msd = translocateClusters(vc, clus);
+		if (msd < 1.) break;
+            }
+	    //reallocateClusters(vc, clus, l); reshapeOrKill(vc, clus, l);
+	    reallocateReshapeKill(vc, clus, l);
+	}
+        function trackClusters() {
+            clusters[0] = atoms;
+	    addNewClusters(settings.maxNumLiveClusters);
+
+	    // allocate atoms to clusters[1]: kmeans(atoms, clusters[1]);
+	    // allocate clusters[i] to clusters[i+1]
+	    for (let i = 0; i < clusters.length - 1; i++) {
+		kmeans(clusters[i], clusters[i+1], i+1);
+	    }
+        }
+        function drawClusters(clus, l) {
+            let i = 0;
+            while (i < clus.length) { // clus.length is evaluated only once, at the start of the loop 
+                let c = clus[i];
+                if (c[2] > 0.) {
+                    color = hsl2str(...c[4]);
+		    lg = Math.PI * c[2] / c[5].length;
+                    drawCircle(c[0], c[1], color, c[2], false, 2*l, [true, lg, lg]);
+                } 
+	        ++i; 
+            }
+        }
+
+
+	/*** ENTITIES ***/
+
+        // level, id, members, groups 	
+	const entities = [[]];
+   
+	const equalSets = (x, y) => {
+	    xs = new Set(x); ys = new Set(y);
+	    return xs.size === ys.size && [...xs].every((xs) => ys.has(xs));
+        }
+	const equalArrays = (x, y) => x.length === y.length && x.every((val, ind) => val === y[ind]);
+	const equalMultisets = (x, y) => {
+	    x.sort((a, b) => a - b);
+	    y.sort((a, b) => a - b);
+	    return equalArrays(x, y);
+        }
+
+        function filterOutRepeats(clus) {
+	    const onlyUnique = (value, index, array) => array.indexOf(value) === index;
+            for (let i=0; i < clus.length; i++) clus[i][5] = clus[i][5].filter(onlyUnique);
+	    return clus;
+        }
+
+        function transcribeClusToEntMultiset(ci, l, ents = entities) {
+	    // does not check for cluster id uniqueness 
+	    let mulset = [];
+	    for (let c of clusters[l][ci][5])
+                for (let k = 0; k < ents[l-1].length; k++)
+	            if (ents[l-1][k][1].includes(c) && ents[l-1][k][3][ents[l-1][k][1].lastIndexOf(c)]==0) 
+		        mulset.push(k); 
+             if (mulset.length != clusters[l][ci][5].length) return undefined;
+	     else                                            return mulset;
+	}
+	function findAtomicEntities(ents) { 
+	    for (let j = 0; j < settings.numColors; j++) {
+		if (ents[0].length-1 < j) ents[0].push([j, [], [], []]); 
+                for (let i = 0; i < clusters[0].length; i++) 
+		    if (clusters[0][i][5] == j && !ents[0][j][1].includes(i)) {
+		        ents[0][j][1].push(i);
+		        ents[0][j][2].push(Date.now());
+		        ents[0][j][3].push(0);
+			clusters[0][i][7] = j;
+		    }
+	    }
+	    return ents;
+	}
+	function findCompoundEntities(i, l, ents) { 
+	    //for (let i = 0; i < clusters[l].length; i++) {   //loop2:
+	    //    if (clusters[l][i].length < 2 || clusters[l][i][5].length < 2) continue; 
+	    mulset = transcribeClusToEntMultiset(i, l);
+            if (mulset === undefined) return [ents, undefined]; // continue;
+	    for (var j = 0; j < ents[l].length; j++) {
+	        if (equalMultisets(mulset, ents[l][j][0])) {      // if the multiset is already registered
+	            if (!ents[l][j][1].includes(i) ||                                                  // cluster object not registered
+	                (ents[l][j][1].includes(i) && ents[l][j][3][ents[l][j][1].lastIndexOf(i)] > 0)) {    // cluster object registered but dead
+	                ents[l][j][1].push(i);
+	                ents[l][j][2].push(Date.now());
+	                ents[l][j][3].push(0);
+	                clusters[l][i][7] = j;
+	            }   
+	            return [ents, j]; //j=0; break; // continue loop2;   // cluster object registered and alive
+	        }
+	    }
+	    if (j == ents[l].length) {   // multiset not registered
+	        ents[l].push([mulset, [i], [Date.now()], [0]]);
+	        clusters[l][i][7] = j;
+	    } 
+            //}
+	    return [ents, j];
+	}
+	function findEntitiesNow(ents = [[]]) { 
+	    if (clusters.length == 0) return ents;
+	    if (ents.length == 0) ents[0] = [];
+
+	    ents = findAtomicEntities(ents);
+
+	    for (l = 1; l < clusters.length; l++) {	    
+	        if (ents.length == l) ents[l] = [];
+	        for (let i = 0; i < clusters[l].length; i++) {   //loop2:
+	            if (clusters[l][i].length < 2 || clusters[l][i][5].length < 2) continue; 
+	            ents = findCompoundEntities(i, l, ents)[0];
+		}
+	    }
+	    return ents;
+        }
+
+	function numEnts() {
+	    let nl = [numAtomTypes], nd = [0];
+	    for (l = 1; l < entities.length; l++) {	   
+		nl[l] = 0; nd[l] = 0;
+		for (let i = 0; i < entities[l].length; i++) {
+		    if (!entities[l][i][3].includes(0)) nd[l]++;
+		    else                                nl[l]++;
+		}
+	    }
+	    return [nl, nd];
+        }	
+
+	    
+
+	/*** PHYSICS ***/
+
+        // Params for click-based prod event
+        var prod = 0;
+        var prod_x = 0, prod_y = 0;
+
+        var exploration_timer = 0;
+        function exploreParameters() {
+            if (exploration_timer <= 0) {
+                let c1 = settings.colors[Math.floor(mb32closure() * settings.numColors)];
+                if (mb32closure() >= 0.2) {  // 80% of the time, we change the strength
+                    let c2 = settings.colors[Math.floor(mb32closure() * settings.numColors)];
+                    let new_strength = mb32closure();
+                    // for better results, we force opposite-signed values
+                    if (settings.interactionForces[c1][c2] > 0) new_strength = -new_strength;
+                    settings.interactionForces[c1][c2] = new_strength;
+                } else {  // ...otherwise, the radius
+                    settings.range[c1] = 1 + Math.floor(mb32closure() * maxRadius[0]);
+                }
+  //              flattenRules();
+                exploration_timer = settings.explorePeriod;
+            }
+            exploration_timer -= 1;
+        }
+
+        var total_v; // global velocity as a estimate of on-screen activity
+
+        // Enact atomic interactions
+        const pushOn = () => {
+            total_v = 0.;
+            // update velocity first
+            for (const a of atoms) {
+                let fx = 0;
+                let fy = 0;
+                const idx = a[5] * settings.numColors;
+// 	const r2 = settings.radii2Array[a[5]]
+                const r2 = settings.range[settings.colors[a[5]]]**2;
+                for (const b of atoms) {
+	  // const g = settings.rulesArray[idx + b[5]];
+		    const g = settings.interactionForces[settings.colors[a[5]]][settings.colors[b[5]]];
+		    let dx = a[0] - b[0], dy = a[1] - b[1];
+	            if (settings.wraparound) {
+		   	const dxpm = [dx-canv.width, dx, dx+canv.width], dypm = [dy-canv.height, dy, dy+canv.height];
+                        const dxa = dxpm.map(Math.abs),                  dya = dypm.map(Math.abs);
+			const dxi = dxpm.indexOf(Math.min(...dxa)),      dyi = dypm.indexOf(Math.min(...dya));
+			dx = dxpm[dxi];			                 dy = dypm[dyi];							
+ 		    }
+                    if (dx !== 0 || dy !== 0) {
+                        const d = dx ** 2 + dy ** 2;
+                        if (d < r2) {
+                            const F = g / Math.sqrt(d);
+                            fx += F * dx; fy += F * dy;
+
+                            // draw lines between interacting atoms 
+                            if (settings.drawings.forcelines) drawInteraction(a[0], a[1], b[0], b[1], settings.colors[b[5]]);                            
+                        }
+                    }
+                }
+                if (prod != 0) {
+                    const dx = a[0] - prod_x, dy = a[1] - prod_y;
+                    const d = dx ** 2 + dy ** 2;
+                    if (d > 0) {
+                        const F = 100. * prod / (d * settings.time_scale);
+                        fx += F * dx; fy += F * dy;
+                    }
+                }
+                if (settings.wallThickness > 0) {
+                  const d = settings.wallThickness;
+                  if (a[0] < d)               fx += (d - a[0]) * wallElasticity;
+                  if (a[0] > canv.width - d)  fx += (canv.width - d - a[0]) * wallElasticity;
+                  if (a[1] < d)               fy += (d - a[1]) * wallElasticity;
+                  if (a[1] > canv.height - d) fy += (canv.height - d - a[1]) * wallElasticity;
+                }
+
+                fy += settings.gravity;
+
+                const vmix = (1. - settings.viscosity);
+                a[2] = a[2] * vmix + fx * settings.time_scale;
+                a[3] = a[3] * vmix + fy * settings.time_scale;
+                // record typical activity, so we can later update time_scale accordingly
+                total_v += Math.abs(a[2]);
+                total_v += Math.abs(a[3]);
+            }
+            // update positions now
+            for (const a of atoms) {
+                a[0] += a[2];
+                a[1] += a[3];
+
+                // upon reaching the canvas fringes
+		if (!settings.wraparound) { // hard wall		
+                    if (a[0] < 0)            {a[0] = -a[0];                  a[2] *= -1;}
+                    if (a[0] >= canv.width)  {a[0] = 2 * canv.width - a[0];  a[2] *= -1;}
+                    if (a[1] < 0)            {a[1] = -a[1];                  a[3] *= -1;}
+                    if (a[1] >= canv.height) {a[1] = 2 * canv.height - a[1]; a[3] *= -1;}
+                } else {                            // wrap around
+		    settings.wallThickness = 0;
+		    if (a[0] > canv.width)  a[0] %= canv.width;
+		    else if (a[0] < 0)      a[0] += canv.width;
+		    if (a[1] > canv.height) a[1] %= canv.height;
+		    else if (a[1] < 0)      a[1] += canv.height;
+		}
+                // if (isNaN(a[1])) debugger;
+            }
+            total_v /= atoms.length;
+        };
+
+
+
+	/*** LET THERE BE LIGHT ***/
+
+	let starttime = Date.now();
+
+        // Initialize PRNG seed 
+        var mb32closure = mulberry32prng(settings.seed);  // closure PRNG initialized with seed
+        getSeedFromUrlFragment();
+
+	// Draw canvas
+        const canv = document.getElementById("mycanvas");
+        const crc = canv.getContext("2d");
+        updateCanvasSize()      // stretch canvas to cover window
+
+        // Generate random interaction forces
+        setColors();
+        randomInteractions();
+
+        // Generate atoms
+        const atoms = [];
+        resetAtoms(settings.atoms.count, true);
+
+	// Set up sundry functionalities  
+        setupProd();
+        setupHotkeys();
+        setupGui();
+
+
+	/*** PRINT STATS ***/ 
+
+        function numAtomsNow() {return settings.atoms.count * settings.colors.length;}    
+        function numClus() {
+	    let nl = [], nd = [], sl = 0, sd = 0;
+	    if (clusters.length>1) for (l = 1; l < clusters.length; l++) {
+		nl[l] = 0; nd[l] = 0;
+	        for (c of clusters[l]) (c.length > 1) ? nl[l]++ : nd[l]++;
+		sl += nl[l]; sd += nd[l];
+	    }
+	    return [nl, nd, sl, sd];
+	}
+	function sumDistsNow() { 
+	    let sumdis = new Array(clusters.length).fill(0);
+	    for (let l=1; l < clusters.length; l++)
+	        for (const c of clusters[l]) if (c.length > 1 && c[6].length!=0)
+	            for (const d of c[6]) sumdis[l] += d;
+            return sumdis;			    
+	}
+	function topbotDistsNow() { 
+	    let sumdis = 0;
+	    if (clusters.length == 0) return sumdis;
+	    topclus = clusters.slice(-1)[0][0];
+	    if (clusters.slice(-1)[0].length==1 && topclus != undefined) {
+	        for (let a of atoms){
+		    let d2 = (a[0] - topclus[0])**2 + (a[1] - topclus[1])**2;
+	            sumdis += Math.sqrt(d2);
+	        }
+	    }
+            return sumdis;			    
+	}
+        
+        function biggestClus() {
+            let c = [], numemb = [];  	    
+	    for (let l = 1; l < clusters.length; l++) {
+		[c[l], numemb[l]] = [0, 0];
+	        for (let j = 0; j < clusters[l].length; j++) 
+		    if (clusters[l][j].length > 1  && clusters[l][j][5].length > numemb[l]) 
+		        {c[l] = j; numemb[l] = clusters[l][j][5].length;}
+	    }
+	    return numemb // [...c, ...numemb]
+        }
+
+        function lifespans() {
+	    let s = [];
+	    for (l = 1; l < entities.length; l++) {
+		s[l] = [];
+	        for (e of entities[l]) 
+		    for (i=0; i< e[1].length; i++) 
+			if (e[3][i] > 0) s[l].push(e[3][i]/10**3); else s[l].push((Date.now() - e[2][i])/10**3);
+	    }
+            return s; 
+	}
+
+        console.log("settings", settings)
+
+	let numclus = 0; 
+        window.setInterval(() => {
+            if (numClus()[2] != numclus) {
+		console.log(clusters);
+		console.log('Number of atoms, maxClus, clusters:', numAtomsNow(), settings.maxNumLiveClusters, numClus())
+	        let sumdis = sumDistsNow().map((x) => Math.round(x));
+	        let totdis = Math.round(sumdis.reduce((a,b)=>a+b,0));
+		console.log("SADs: ", sumdis, totdis, totdis/numAtomsNow(), Math.round(100*totdis/topbotDistsNow()))
+		console.log("Biggest clusters: ",biggestClus())
+		numclus = numClus()[2];
+	    }
+	    //if (numDeadClusNow()>0) alert(`${numDeadClusNow()} cluster(s) died`);
+	}, 1000);
+
+
+        /*** PLOTTING ***/
+
+        const plt = document.getElementById("fig01");
+	plt.style.height = canv.height * 0.9;
+
+	function vlog10(x) {return x.map((el) => Math.log10(el))};
+	function vllog10(x) {return x.map((el) => Math.log10(el.length))};
+	fig = document.getElementById("fig01");
+        let layout = {grid: {rows:5, columns:1, roworder: "top to bottom"}, barmode: "overlay", 
+	              title: "plotly", showlegend: true, margin: {l: 30, r: 10, b: 20, t: 20, pad: 5},
+	              xaxis4: {anchor: "y4"}, xaxis5: {anchor: "y5", type: "linear", autorange: true}, yaxis5: {type: "log"}};
+	function plots() {
+	    let cl = Array(clusters.length).fill().map((elm, ind) => ind);
+	    let trace1 = {name: "SAD", x: cl, y: vlog10(sumDistsNow()), type: "scatter"};
+	    let trace2 = {name: "bigclus",x: cl, y: vlog10(biggestClus()), xaxis: "x", yaxis: "y2"};
+	    let trace3 = {name: "live ents", x: cl, y: vlog10(numEnts()[0]), yaxis: "y3"};
+	    let trace4 = {name: "dead ents", x: cl, y: vlog10(numEnts()[1]), yaxis: "y3"};
+	    let trace5 = {name: "all ents now", x: cl, y: vllog10(findEntitiesNow()), yaxis: "y3"};
+	    let trace6 = {name: "live clus", x: cl, y: vlog10(numClus()[0]), yaxis: "y4"};
+	    let trace7 = {name: "dead clus", x: cl, y: vlog10(numClus()[1]), yaxis: "y4"};
+
+	    let tracehist = [];
+	    for (let i=1; i < entities.length; i++) 
+	    tracehist[i-1] = {name: `count L${i}`, x: lifespans()[i], type: 'histogram', histfunc: "count", opacity: .4, xaxis: "x5", yaxis: "y5"};
+	    Plotly.newPlot(fig, [trace1, trace2, trace3, trace4, trace5, trace6, trace7, ...tracehist], layout); 
+        }
+
+
+        /*** REFRESH AND READJUST ***/
+
+        let justnow = Date.now();
+        refresh();
+
+	function refresh() {
+	    // update canvas 
+            updateCanvasSize() 
+            crc.fillStyle = settings.drawings.background_color;  
+            crc.fillRect(0, 0, canv.width, canv.height); // bg color
+			
+            // step forward
+            pushOn();
+
+            // draw atoms
+            for (const a of atoms) {
+                if (settings.drawings.round) drawCircle(a[0], a[1], hsl2str(...a[4]), settings.atoms.radius);
+                else                          drawSquare(a[0], a[1], hsl2str(...a[4]), settings.atoms.radius);                
+            }
+            if (settings.drawings.clusters) {
+	        trackClusters();
+
+	        // draw clusters
+                for (let i = 1; i < clusters.length; i++) drawClusters(clusters[i], i);
+
+	        // discover entities
+	        findEntitiesNow(entities);
+            }
+
+
+            readjust();
+
+	    plots();
+
+	    // Tally atoms within canvas
+            //const inSight = (a) => 0 <= a[0] && a[0] < canv.width && 0 <= a[1] && a[1] < canv.height;
+            //console.log('atoms in sight', atoms.filter(inSight).length);  
+
+            requestAnimationFrame(refresh);
+        };
+
+        // post-frame stats and readjustments
+        function readjust() {
+            // record fps
+            var rightnow = Date.now();
+            if (rightnow > justnow) {
+                const new_fps = 1000. / (rightnow - justnow);
+                settings.fps = Math.round(settings.fps * 0.8 + new_fps * 0.2)
+                justnow = rightnow;
+            }
+
+            // adapt time_scale based on activity
+            if (total_v > 30. && settings.time_scale > 5.) settings.time_scale /= 1.1;
+            if (settings.time_scale < 0.9) settings.time_scale *= 1.01;
+            if (settings.time_scale > 1.1) settings.time_scale /= 1.01;
+
+	    // click prod and parameter exploration
+            if (prod != 0) prod -= (prod > 0) ? 1 : -1;
+            if (settings.explore) exploreParameters();
+        }
+
+
+
+        /*** RECORD VIDEO ***/ 
+
+        function dataUrlDownloader(dataURL, name = `Racemi_${settings.seed}`) {
+            const hyperlink = document.createElement("a");
+            // document.body.appendChild(hyperlink);
+            hyperlink.download = name; // the target will be downloaded on clicking on the hyperlink
+            //hyperlink.target = '_blank';
+            hyperlink.href = dataURL;
+            hyperlink.click();  // HTMLElement.click() method simulates a mouse click on an element
+            hyperlink.remove();
+        };
+
+        const videoStream = canv.captureStream(); // stream 
+        const mediaRecorder = new MediaRecorder(videoStream); // video recorder
+        let chunks = []; // temporal chunks
+
+        mediaRecorder.ondataavailable = (e) => chunks.push(e.data); // store chunks
+        mediaRecorder.onstop = function (e) {
+            const blob = new Blob(chunks, { 'type': 'video/mp4' }); // chunks --> blob
+            const videoDataURL = URL.createObjectURL(blob); // blob --> dataURL
+            dataUrlDownloader(videoDataURL); // download video
+            chunks = []; // reset chunks
+        };
+        // mediaRecorder.start(); // start recording
+        // mediaRecorder.stop(); // stop recording
+
+
+    </script>
+
+</body>
+
+</html>
