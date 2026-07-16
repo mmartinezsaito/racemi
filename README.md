@@ -1,4 +1,9 @@
-# Interacting particle system and BUNCH algorithm
+# BUNCH for Interacting Particle Systems
+
+RACEMI is a C++ simulation and analysis framework implementing BUNCH, a hierarchical filtering algorithm for identifying persistent, entity-like structures in interactive particle systems.
+
+BUNCH identifies dynamically coherent structures across scales, enabling quantitative study of entity persistence, lifeness, and criticality in complex dynamical environments.
+
 
 Code for the BUNCH algorithm described in the article [Defining and finding lifelike entities with a lazy filter](https://arxiv.org/abs/2504.14774).
 
